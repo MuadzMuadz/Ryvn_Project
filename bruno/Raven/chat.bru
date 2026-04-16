@@ -1,0 +1,25 @@
+meta {
+  name: Chat (SSE)
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{base_url}}/chat
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "message": "halo, siapa kamu?",
+    "session_id": "{{session_id}}"
+  }
+}
+
+script:post-response {
+  const sessionId = res.headers['x-session-id'];
+  if (sessionId) {
+    bru.setEnvVar("session_id", sessionId);
+  }
+}
