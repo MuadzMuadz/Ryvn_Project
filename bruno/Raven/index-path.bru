@@ -1,5 +1,5 @@
 meta {
-  name: Index Path (SSE)
+  name: Index Path
   type: http
   seq: 4
 }
@@ -8,6 +8,10 @@ post {
   url: {{base_url}}/index
   body: json
   auth: none
+}
+
+headers {
+  X-API-Key: {{api_key}}
 }
 
 body:json {

@@ -10,11 +10,6 @@ from typing import List
 from raven.config import INDEXED_EXTENSIONS, INDEXED_DIR
 from raven.rag.vectorstore import VectorStore
 
-EXCLUDE_DIRS = {
-    ".venv", "venv", "node_modules", "__pycache__", ".git",
-    "site-packages", "dist-packages", ".tox", ".eggs", "dist", "build",
-}
-
 
 def _read_text(path: Path) -> str:
     ext = path.suffix.lower()
@@ -107,8 +102,6 @@ class FileIndexer:
         total = 0
         pattern = "**/*" if recursive else "*"
         for path in directory.glob(pattern):
-            if any(part in EXCLUDE_DIRS for part in path.parts):
-                continue
             if path.is_file() and path.suffix.lower() in INDEXED_EXTENSIONS:
                 total += self.index_file(path)
         return total

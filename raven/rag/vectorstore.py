@@ -1,6 +1,8 @@
-"""Local ChromaDB vector store with API-based embeddings (bge-m3)."""
+"""Local ChromaDB vector store with API-based embeddings."""
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 from typing import List
 
@@ -8,23 +10,26 @@ import chromadb
 from chromadb.config import Settings
 from openai import OpenAI
 
-from raven.config import CHROMA_PERSIST_DIR, CHROMA_COLLECTION, EMBEDDING_MODEL, OPENAI_API_KEY, OPENAI_BASE_URL
+from raven.config import (
+    CHROMA_COLLECTION,
+    CHROMA_PERSIST_DIR,
+    EMBEDDING_MODEL,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+)
 
+logger = logging.getLogger("raven.vectorstore")
 
 EMBED_BATCH_SIZE = 32
 EMBED_MAX_RETRIES = 5
-EMBED_RETRY_DELAY = 3  # seconds
+EMBED_RETRY_DELAY = 3
 
 
 class APIEmbedder:
     def __init__(self):
-        self._client = OpenAI(
-            api_key=OPENAI_API_KEY,
-            base_url=OPENAI_BASE_URL,
-        )
+        self._client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
 
     def _embed_batch(self, texts: list[str]) -> list[list[float]]:
-        import time
         for attempt in range(EMBED_MAX_RETRIES):
             try:
                 response = self._client.embeddings.create(
@@ -33,15 +38,17 @@ class APIEmbedder:
                 )
                 return [item.embedding for item in response.data]
             except Exception as e:
-                if "429" in str(e) or "overload" in str(e).lower():
+                msg = str(e)
+                if "429" in msg or "overload" in msg.lower():
                     wait = EMBED_RETRY_DELAY * (2 ** attempt)
+                    logger.warning("embed 429, retry %d/%d in %ds", attempt + 1, EMBED_MAX_RETRIES, wait)
                     time.sleep(wait)
                 else:
+                    logger.error("embed failed: %s", e)
                     raise
         raise RuntimeError(f"Embedding failed after {EMBED_MAX_RETRIES} retries")
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        import time
         results = []
         for i in range(0, len(texts), EMBED_BATCH_SIZE):
             batch = texts[i: i + EMBED_BATCH_SIZE]

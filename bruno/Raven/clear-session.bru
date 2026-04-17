@@ -1,13 +1,17 @@
 meta {
   name: Clear Session
   type: http
-  seq: 5
+  seq: 6
 }
 
 delete {
   url: {{base_url}}/session/{{session_id}}
   body: none
   auth: none
+}
+
+headers {
+  X-API-Key: {{api_key}}
 }
 
 script:post-response {
