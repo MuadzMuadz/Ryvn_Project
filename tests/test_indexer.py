@@ -18,7 +18,7 @@ def mock_embedder():
 
 
 @pytest.fixture
-def _isolated_indexer(tmp_chroma_dir, tmp_watch_path, monkeypatch, mock_embedder):
+def _isolated_indexer(tmp_chroma_dir, tmp_watch_path, tmp_path, monkeypatch, mock_embedder):
     """Reload config + vectorstore with isolated dirs and mocked embedder."""
     import importlib
 
@@ -27,6 +27,15 @@ def _isolated_indexer(tmp_chroma_dir, tmp_watch_path, monkeypatch, mock_embedder
     monkeypatch.setenv("CHROMA_PERSIST_DIR", str(tmp_chroma_dir))
     monkeypatch.setenv("WATCH_PATHS", str(tmp_watch_path))
     importlib.reload(cfg)
+    # Isolate the indexer's state file. FileIndexer persists hashes in
+    # INDEXED_DIR/index_state.json; without this the suite shares the real
+    # data/indexed/ file, and because pytest reuses tmp dir names across runs the
+    # cached hash makes index_file() return 0 ("unchanged") -> flaky failures.
+    import raven.rag.indexer as ix_mod
+
+    indexed_dir = tmp_path / "indexed"
+    indexed_dir.mkdir()
+    monkeypatch.setattr(ix_mod, "INDEXED_DIR", indexed_dir)
     # Reset vectorstore singleton so it uses tmp dir
     import raven.rag.vectorstore as vs_mod
 
