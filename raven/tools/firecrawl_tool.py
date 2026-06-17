@@ -1,13 +1,13 @@
 """Firecrawl integration — scrape & crawl via local Docker instance."""
-from __future__ import annotations
 
-import logging
+from __future__ import annotations
 
 from firecrawl import FirecrawlApp
 
 from raven.config import FIRECRAWL_API_KEY, FIRECRAWL_API_URL
+from raven.logging_config import get_logger
 
-logger = logging.getLogger("raven.firecrawl")
+logger = get_logger("raven.firecrawl")
 
 
 def _client() -> FirecrawlApp:
@@ -19,7 +19,7 @@ def scrape_url(url: str) -> str:
     try:
         doc = _client().scrape(url, formats=["markdown"], only_main_content=True)
     except Exception as e:
-        logger.warning("scrape failed for %s: %s", url, e)
+        logger.warning("scrape_failed", url=url, error=str(e))
         return ""
     return doc.markdown or ""
 
@@ -29,7 +29,7 @@ def crawl_url(url: str, max_pages: int = 10) -> list[dict]:
     try:
         job = _client().crawl(url, limit=max_pages)
     except Exception as e:
-        logger.warning("crawl failed for %s: %s", url, e)
+        logger.warning("crawl_failed", url=url, error=str(e))
         return []
     pages = getattr(job, "data", None) or []
     out: list[dict] = []
@@ -45,14 +45,16 @@ def search_web(query: str, limit: int = 5) -> list[dict]:
     try:
         result = _client().search(query, limit=limit)
     except Exception as e:
-        logger.warning("search failed for %s: %s", query, e)
+        logger.warning("search_failed", query=query, error=str(e))
         return []
     web = getattr(result, "web", None) or []
     out: list[dict] = []
     for item in web:
-        out.append({
-            "title": getattr(item, "title", ""),
-            "url": getattr(item, "url", ""),
-            "description": getattr(item, "description", ""),
-        })
+        out.append(
+            {
+                "title": getattr(item, "title", ""),
+                "url": getattr(item, "url", ""),
+                "description": getattr(item, "description", ""),
+            }
+        )
     return out

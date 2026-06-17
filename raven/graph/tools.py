@@ -1,18 +1,31 @@
 """LangChain tools exposed to the agent."""
+
 from __future__ import annotations
 
+import datetime
+import re
 from pathlib import Path
 
 from langchain_core.tools import tool
 
-from raven.config import WATCH_PATHS
+from raven.config import NOTES_DIR, WATCH_PATHS
+from raven.logging_config import get_logger
 from raven.rag.indexer import FileIndexer
 from raven.rag.vectorstore import get_store
 from raven.tools.firecrawl_tool import crawl_url, scrape_url, search_web
 
+logger = get_logger("raven.tools")
+
 _store = get_store()
 _indexer = FileIndexer(store=_store)
 _ALLOWED_ROOTS = [Path(p).resolve() for p in WATCH_PATHS]
+
+
+def _slugify(text: str, max_len: int = 60) -> str:
+    """Filesystem-safe slug from a note title."""
+    slug = re.sub(r"[^\w\s-]", "", text).strip()
+    slug = re.sub(r"\s+", " ", slug)
+    return slug[:max_len].strip() or "untitled"
 
 
 def _is_allowed(p: Path) -> bool:
@@ -79,6 +92,46 @@ def web_search(query: str, limit: int = 5) -> str:
 
 
 @tool
+def save_note(title: str, content: str, tags: str = "", folder: str = "") -> str:
+    """Save a markdown note to Raven's notes vault, then index it so it becomes searchable later.
+
+    Use this whenever the user asks you to write something down, remember a fact, jot a summary,
+    or keep a record — or when you produce something worth persisting across conversations.
+    - title: short note title (becomes the filename).
+    - content: the note body, in markdown.
+    - tags: optional comma-separated tags (e.g. "meeting,raven").
+    - folder: optional subfolder under the notes vault (e.g. "Logs").
+    """
+    today = datetime.date.today().isoformat()
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H%M")
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
+    target_dir = NOTES_DIR / folder.strip("/ ") if folder.strip() else NOTES_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    path = target_dir / f"{stamp} - {_slugify(title)}.md"
+    frontmatter = (
+        "---\n"
+        f"title: {title}\n"
+        f"created: {today}\n"
+        f"tags: [{', '.join(tag_list)}]\n"
+        "type: note\n"
+        "source: raven\n"
+        "---\n\n"
+    )
+    body = f"# {title}\n\n{content.strip()}\n"
+    try:
+        path.write_text(frontmatter + body, encoding="utf-8")
+    except OSError as e:
+        logger.warning("save_note_failed", path=str(path), error=str(e))
+        return f"Failed to save note: {e}"
+
+    n = _indexer.index_file(path)
+    logger.info("note_saved", path=str(path), chunks=n)
+    return f"Saved note '{title}' to {path} ({n} chunks indexed)."
+
+
+@tool
 def get_indexed_stats() -> str:
     """Get statistics about the local knowledge base."""
     return f"Vector store contains {_store.count()} document chunks."
@@ -87,6 +140,7 @@ def get_indexed_stats() -> str:
 TOOLS = [
     search_local_docs,
     index_local_path,
+    save_note,
     scrape_webpage,
     crawl_website,
     web_search,

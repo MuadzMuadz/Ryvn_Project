@@ -1,10 +1,26 @@
-.env
+# Virtual environment
 .venv/
+
+# Python
 __pycache__/
 *.pyc
-data/vectors/
-data/indexed/
-data/uploads/
 *.egg-info/
 dist/
+
+# Data (sessions, vectors, index state)
+data/
+*.db
+index_state.json
+
+# Environment / secrets
+.env
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# OS
 .DS_Store

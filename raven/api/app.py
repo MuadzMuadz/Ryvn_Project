@@ -1,15 +1,18 @@
 """FastAPI backend for Raven."""
+
 from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
 
+import aiosqlite
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -17,16 +20,61 @@ from sse_starlette.sse import EventSourceResponse
 from raven.config import (
     ALLOWED_ORIGINS,
     API_KEY,
+    ENABLE_WATCHER,
+    INDEX_ON_STARTUP,
     INDEXED_EXTENSIONS,
+    SESSIONS_DB,
     WATCH_PATHS,
+    WATCHER_PATHS,
 )
 from raven.graph.agent import delete_thread, get_graph
-from raven.rag.indexer import EXCLUDE_DIRS, FileIndexer
+from raven.logging_config import get_logger, setup_logging
+from raven.rag.indexer import FileIndexer, is_excluded
 from raven.rag.vectorstore import get_store
+from raven.rag.watcher import FileWatcher
 
-logger = logging.getLogger("raven.api")
+setup_logging()
+logger = get_logger("raven.api")
 
-app = FastAPI(title="Raven API", version="0.1.0")
+
+def _run_initial_index() -> None:
+    """One-time full index of WATCH_PATHS. Runs in a thread to not block startup."""
+    indexer = FileIndexer(store=get_store())
+    total_files = 0
+    total_chunks = 0
+    for watch_path in WATCH_PATHS:
+        p = Path(watch_path)
+        if not p.exists():
+            logger.warning("initial_index_skip", path=str(p), reason="not found")
+            continue
+        logger.info("initial_index_start", path=str(p))
+        n = indexer.index_directory(p)
+        total_chunks += n
+        total_files += 1
+    logger.info("initial_index_done", paths=total_files, chunks=total_chunks)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    watcher: FileWatcher | None = None
+    if INDEX_ON_STARTUP:
+        logger.info("initial_index_scheduled", paths=WATCH_PATHS)
+        asyncio.get_running_loop().run_in_executor(None, _run_initial_index)
+    if ENABLE_WATCHER:
+        watcher = FileWatcher(indexer=FileIndexer(store=get_store()), paths=WATCHER_PATHS)
+        # start() walks the tree to install inotify watches — run it off the event
+        # loop so a large directory can't block uvicorn from binding the port.
+        asyncio.get_running_loop().run_in_executor(None, watcher.start)
+        logger.info("watcher_enabled", paths=WATCHER_PATHS)
+    try:
+        yield
+    finally:
+        if watcher is not None:
+            watcher.stop()
+            logger.info("watcher_stopped")
+
+
+app = FastAPI(title="Raven API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -41,6 +89,7 @@ _ALLOWED_ROOTS = [Path(p).resolve() for p in WATCH_PATHS]
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
+
 def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
     if not API_KEY:
         return  # auth disabled in dev
@@ -50,9 +99,14 @@ def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
 
 # ── Path validation ───────────────────────────────────────────────────────────
 
+
 def _validate_path(raw: str) -> Path:
     p = Path(raw).expanduser().resolve()
-    if not any(str(p) == str(root) or str(p).startswith(str(root) + "/") for root in _ALLOWED_ROOTS):
+    if p.is_symlink():
+        raise HTTPException(status_code=403, detail="Symlinks not allowed")
+    if not any(
+        str(p) == str(root) or str(p).startswith(str(root) + "/") for root in _ALLOWED_ROOTS
+    ):
         raise HTTPException(
             status_code=403,
             detail=f"Path outside allowed roots (WATCH_PATHS): {p}",
@@ -63,6 +117,7 @@ def _validate_path(raw: str) -> Path:
 
 
 # ── Models ────────────────────────────────────────────────────────────────────
+
 
 class ChatRequest(BaseModel):
     message: str
@@ -75,54 +130,65 @@ class IndexRequest(BaseModel):
 
 # ── SSE stream (chat) ─────────────────────────────────────────────────────────
 
+
 async def _chat_stream(session_id: str, message: str) -> AsyncIterator[dict]:
     graph = await get_graph()
-    config = {"configurable": {"thread_id": session_id}}
+    config = {"configurable": {"thread_id": session_id}, "recursion_limit": 25}
     new_input = {"messages": [HumanMessage(content=message)]}
 
-    full_answer: list[str] = []
+    try:
+        async for event in graph.astream_events(new_input, config=config, version="v2"):
+            kind = event["event"]
+            name = event.get("name", "")
+            data = event.get("data", {})
 
-    async for event in graph.astream_events(new_input, config=config, version="v2"):
-        kind = event["event"]
-        name = event.get("name", "")
-        data = event.get("data", {})
+            if kind == "on_chain_end" and name == "retrieve":
+                docs = data.get("output", {}).get("retrieved_docs", [])
+                if docs:
+                    yield {
+                        "event": "retrieval",
+                        "data": json.dumps(
+                            [
+                                f"{d['metadata'].get('filename', 'unknown')} ({round(d['score'] * 100)}%)"
+                                for d in docs
+                            ]
+                        ),
+                    }
 
-        if kind == "on_chain_end" and name == "retrieve":
-            docs = data.get("output", {}).get("retrieved_docs", [])
-            if docs:
+            elif kind == "on_chat_model_stream":
+                chunk = data.get("chunk")
+                if chunk and chunk.content:
+                    yield {
+                        "event": "token",
+                        "data": json.dumps({"text": chunk.content}),
+                    }
+
+            elif kind == "on_tool_start":
                 yield {
-                    "event": "retrieval",
-                    "data": json.dumps([
-                        f"{d['metadata'].get('filename', 'unknown')} ({round(d['score'] * 100)}%)"
-                        for d in docs
-                    ]),
+                    "event": "tool_start",
+                    "data": json.dumps({"tool": name, "input": data.get("input", {})}),
                 }
 
-        elif kind == "on_chat_model_stream":
-            chunk = data.get("chunk")
-            if chunk and chunk.content:
-                full_answer.append(chunk.content)
-
-        elif kind == "on_tool_start":
-            yield {
-                "event": "tool_start",
-                "data": json.dumps({"tool": name, "input": data.get("input", {})}),
-            }
-
-        elif kind == "on_tool_end":
-            output = data.get("output", "")
-            yield {
-                "event": "tool_end",
-                "data": json.dumps({"tool": name, "output": str(output)[:500]}),
-            }
-
-    if full_answer:
-        yield {"event": "message", "data": json.dumps({"text": "".join(full_answer)})}
-
-    yield {"event": "done", "data": json.dumps({"session_id": session_id})}
+            elif kind == "on_tool_end":
+                output = data.get("output", "")
+                yield {
+                    "event": "tool_end",
+                    "data": json.dumps({"tool": name, "output": str(output)[:500]}),
+                }
+    finally:
+        yield {"event": "done", "data": json.dumps({"session_id": session_id})}
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+
+_STATIC_DIR = Path(__file__).parent / "static"
+
+
+@app.get("/")
+async def ui():
+    """Serve the single-file web chat UI (public — page must load before auth)."""
+    return FileResponse(_STATIC_DIR / "index.html")
+
 
 @app.post("/chat", dependencies=[Depends(require_api_key)])
 async def chat(req: ChatRequest):
@@ -137,23 +203,24 @@ async def chat(req: ChatRequest):
 async def index_path(req: IndexRequest):
     p = _validate_path(req.path)
     indexer = FileIndexer()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     total_chunks = 0
     total_files = 0
     skipped = 0
 
     if p.is_file():
         n = await loop.run_in_executor(None, indexer.index_file, p)
-        logger.info("indexed %s → %d chunks", p.name, n)
+        logger.info("file_indexed", file=p.name, chunks=n)
         total_chunks = n
         total_files = 1 if n > 0 else 0
         skipped = 1 if n == 0 else 0
     else:
         files = [
-            f for f in p.glob("**/*")
+            f
+            for f in p.glob("**/*")
             if f.is_file()
             and f.suffix.lower() in INDEXED_EXTENSIONS
-            and not any(part in EXCLUDE_DIRS for part in f.parts)
+            and not is_excluded(f)
         ]
         for file in files:
             n = await loop.run_in_executor(None, indexer.index_file, file)
@@ -162,7 +229,12 @@ async def index_path(req: IndexRequest):
             else:
                 total_chunks += n
                 total_files += 1
-            logger.info("%s %s (%d chunks)", "skip" if n == 0 else "idx ", file.name, n)
+            logger.info(
+                "file_processed",
+                file=file.name,
+                chunks=n,
+                status="skipped" if n == 0 else "indexed",
+            )
 
     return {
         "path": str(p),
@@ -178,7 +250,7 @@ async def index_init():
         indexer = FileIndexer()
         grand_total_files = 0
         grand_total_chunks = 0
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         for watch_path in WATCH_PATHS:
             p = Path(watch_path)
@@ -187,13 +259,17 @@ async def index_init():
                 continue
 
             files = [
-                f for f in p.glob("**/*")
+                f
+                for f in p.glob("**/*")
                 if f.is_file()
                 and f.suffix.lower() in INDEXED_EXTENSIONS
-                and not any(part in EXCLUDE_DIRS for part in f.parts)
+                and not is_excluded(f)
             ]
 
-            yield {"event": "start", "data": json.dumps({"path": str(p), "total_files": len(files)})}
+            yield {
+                "event": "start",
+                "data": json.dumps({"path": str(p), "total_files": len(files)}),
+            }
 
             path_chunks = 0
             path_files = 0
@@ -204,12 +280,14 @@ async def index_init():
                     path_files += 1
                 yield {
                     "event": "progress",
-                    "data": json.dumps({
-                        "file": file.name,
-                        "chunks": n,
-                        "progress": f"{i}/{len(files)}",
-                        "status": "skipped" if n == 0 else "indexed",
-                    }),
+                    "data": json.dumps(
+                        {
+                            "file": file.name,
+                            "chunks": n,
+                            "progress": f"{i}/{len(files)}",
+                            "status": "skipped" if n == 0 else "indexed",
+                        }
+                    ),
                 }
 
             grand_total_files += path_files
@@ -221,16 +299,81 @@ async def index_init():
 
         yield {
             "event": "done",
-            "data": json.dumps({"total_files": grand_total_files, "total_chunks": grand_total_chunks}),
+            "data": json.dumps(
+                {"total_files": grand_total_files, "total_chunks": grand_total_chunks}
+            ),
         }
 
     return EventSourceResponse(_stream())
 
 
+async def _count_sessions() -> int:
+    try:
+        async with aiosqlite.connect(str(SESSIONS_DB)) as conn:
+            cur = await conn.execute("SELECT COUNT(DISTINCT thread_id) FROM checkpoints")
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
 @app.get("/stats", dependencies=[Depends(require_api_key)])
 async def stats():
     store = get_store()
-    return {"chunks": store.count(), "allowed_roots": [str(r) for r in _ALLOWED_ROOTS]}
+    session_count = await _count_sessions()
+    return {
+        "chunks": store.count(),
+        "session_count": session_count,
+        "allowed_roots": [str(r) for r in _ALLOWED_ROOTS],
+    }
+
+
+@app.get("/sessions", dependencies=[Depends(require_api_key)])
+async def list_sessions():
+    """List conversation sessions (newest first) with a title from the first user message."""
+    graph = await get_graph()  # ensures the checkpoint table exists
+    try:
+        async with aiosqlite.connect(str(SESSIONS_DB)) as conn:
+            cur = await conn.execute(
+                "SELECT thread_id, MAX(checkpoint_id) AS last "
+                "FROM checkpoints GROUP BY thread_id ORDER BY last DESC"
+            )
+            rows = await cur.fetchall()
+    except Exception:
+        return {"sessions": []}
+
+    sessions = []
+    for thread_id, _ in rows:
+        title, count = "", 0
+        try:
+            snap = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+            msgs = (snap.values or {}).get("messages", []) if snap else []
+            count = len(msgs)
+            first = next((m.content for m in msgs if getattr(m, "type", "") == "human"), "")
+            if isinstance(first, str) and first.strip():
+                title = first.strip()[:60]
+        except Exception:
+            pass
+        sessions.append({"session_id": thread_id, "title": title or "(untitled)", "messages": count})
+    return {"sessions": sessions}
+
+
+@app.get("/session/{session_id}/history", dependencies=[Depends(require_api_key)])
+async def session_history(session_id: str):
+    """Return the user/assistant messages of a session for restoring the conversation."""
+    graph = await get_graph()
+    try:
+        snap = await graph.aget_state({"configurable": {"thread_id": session_id}})
+        msgs = (snap.values or {}).get("messages", []) if snap else []
+    except Exception:
+        msgs = []
+    out = []
+    for m in msgs:
+        role = getattr(m, "type", "")
+        content = getattr(m, "content", "")
+        if role in ("human", "ai") and isinstance(content, str) and content.strip():
+            out.append({"role": "user" if role == "human" else "assistant", "content": content})
+    return {"session_id": session_id, "messages": out}
 
 
 @app.delete("/session/{session_id}", dependencies=[Depends(require_api_key)])
@@ -242,21 +385,18 @@ async def clear_session(session_id: str):
 @app.get("/health")
 async def health():
     checks: dict[str, str] = {"api": "ok"}
-    status_code = 200
 
     try:
         get_store().count()
         checks["chroma"] = "ok"
     except Exception as e:
         checks["chroma"] = f"error: {e.__class__.__name__}"
-        status_code = 503
 
     try:
         await get_graph()
         checks["graph"] = "ok"
     except Exception as e:
         checks["graph"] = f"error: {e.__class__.__name__}"
-        status_code = 503
 
     overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
     return {"status": overall, "checks": checks}

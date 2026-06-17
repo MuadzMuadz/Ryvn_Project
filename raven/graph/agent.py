@@ -1,15 +1,14 @@
 """LangGraph agent with persistent (async) checkpointer."""
+
 from __future__ import annotations
 
 import aiosqlite
-
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
 
 from raven.config import SESSIONS_DB
+from raven.graph.nodes import agent_node, retrieve_node, should_continue, tool_node
 from raven.graph.state import AgentState
-from raven.graph.nodes import retrieve_node, agent_node, tool_node, should_continue
-
 
 _graph = None
 _saver: AsyncSqliteSaver | None = None
@@ -35,6 +34,7 @@ def _build_graph(saver: AsyncSqliteSaver):
     g.add_edge("retrieve", "agent")
     g.add_conditional_edges("agent", should_continue, {"tools": "tools", "end": END})
     g.add_edge("tools", "agent")
+    # recursion_limit is an invoke-time config value, not a compile() argument.
     return g.compile(checkpointer=saver)
 
 

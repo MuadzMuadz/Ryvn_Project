@@ -1,10 +1,9 @@
 """Local ChromaDB vector store with API-based embeddings."""
+
 from __future__ import annotations
 
-import logging
 import time
 from pathlib import Path
-from typing import List
 
 import chromadb
 from chromadb.config import Settings
@@ -17,8 +16,9 @@ from raven.config import (
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
 )
+from raven.logging_config import get_logger
 
-logger = logging.getLogger("raven.vectorstore")
+logger = get_logger("raven.vectorstore")
 
 EMBED_BATCH_SIZE = 32
 EMBED_MAX_RETRIES = 5
@@ -40,18 +40,23 @@ class APIEmbedder:
             except Exception as e:
                 msg = str(e)
                 if "429" in msg or "overload" in msg.lower():
-                    wait = EMBED_RETRY_DELAY * (2 ** attempt)
-                    logger.warning("embed 429, retry %d/%d in %ds", attempt + 1, EMBED_MAX_RETRIES, wait)
+                    wait = EMBED_RETRY_DELAY * (2**attempt)
+                    logger.warning(
+                        "embed_rate_limited",
+                        attempt=attempt + 1,
+                        max_retries=EMBED_MAX_RETRIES,
+                        wait_s=wait,
+                    )
                     time.sleep(wait)
                 else:
-                    logger.error("embed failed: %s", e)
+                    logger.error("embed_failed", error=str(e))
                     raise
         raise RuntimeError(f"Embedding failed after {EMBED_MAX_RETRIES} retries")
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         results = []
         for i in range(0, len(texts), EMBED_BATCH_SIZE):
-            batch = texts[i: i + EMBED_BATCH_SIZE]
+            batch = texts[i : i + EMBED_BATCH_SIZE]
             results.extend(self._embed_batch(batch))
             if i + EMBED_BATCH_SIZE < len(texts):
                 time.sleep(0.5)
@@ -71,7 +76,7 @@ class VectorStore:
             metadata={"hnsw:space": "cosine"},
         )
 
-    def add(self, docs: List[dict]) -> None:
+    def add(self, docs: list[dict]) -> None:
         if not docs:
             return
         ids = [d["id"] for d in docs]
@@ -85,7 +90,7 @@ class VectorStore:
             metadatas=metas,
         )
 
-    def query(self, text: str, n_results: int = 5) -> List[dict]:
+    def query(self, text: str, n_results: int = 5) -> list[dict]:
         embedding = self._embedder.embed([text])[0]
         results = self._collection.query(
             query_embeddings=[embedding],
@@ -94,11 +99,13 @@ class VectorStore:
         )
         out = []
         for i, doc in enumerate(results["documents"][0]):
-            out.append({
-                "text": doc,
-                "metadata": results["metadatas"][0][i],
-                "score": 1 - results["distances"][0][i],
-            })
+            out.append(
+                {
+                    "text": doc,
+                    "metadata": results["metadatas"][0][i],
+                    "score": 1 - results["distances"][0][i],
+                }
+            )
         return out
 
     def delete_by_source(self, source: str) -> None:
@@ -107,10 +114,11 @@ class VectorStore:
             self._collection.delete(ids=results["ids"])
 
     def count(self) -> int:
-        return self._collection.count()
+        return self._collection.count()  # type: ignore[no-any-return]
 
 
 _instance: VectorStore | None = None
+
 
 def get_store() -> VectorStore:
     global _instance
