@@ -12,9 +12,9 @@ from openai import OpenAI
 from raven.config import (
     CHROMA_COLLECTION,
     CHROMA_PERSIST_DIR,
+    EMBEDDING_API_KEY,
+    EMBEDDING_BASE_URL,
     EMBEDDING_MODEL,
-    OPENAI_API_KEY,
-    OPENAI_BASE_URL,
 )
 from raven.logging_config import get_logger
 
@@ -27,7 +27,7 @@ EMBED_RETRY_DELAY = 3
 
 class APIEmbedder:
     def __init__(self):
-        self._client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+        self._client = OpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_BASE_URL)
 
     def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         for attempt in range(EMBED_MAX_RETRIES):

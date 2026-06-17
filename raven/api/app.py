@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 import aiosqlite
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -21,8 +23,10 @@ from raven.config import (
     ALLOWED_ORIGINS,
     API_KEY,
     ENABLE_WATCHER,
+    FALLBACK_OPENAI_BASE_URL,
     INDEX_ON_STARTUP,
     INDEXED_EXTENSIONS,
+    OPENAI_BASE_URL,
     SESSIONS_DB,
     WATCH_PATHS,
     WATCHER_PATHS,
@@ -382,6 +386,22 @@ async def clear_session(session_id: str):
     return {"cleared": session_id}
 
 
+def _tcp_reachable(url: str | None, timeout: float = 2.0) -> bool:
+    """Quick TCP connect to a base_url's host:port — used to tell if the primary LLM
+    (e.g. the VPN-gated LiteLLM proxy) is up, without making a model call."""
+    if not url:
+        return False
+    parsed = urlparse(url)
+    if not parsed.hostname:
+        return False
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((parsed.hostname, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 @app.get("/health")
 async def health():
     checks: dict[str, str] = {"api": "ok"}
@@ -398,5 +418,19 @@ async def health():
     except Exception as e:
         checks["graph"] = f"error: {e.__class__.__name__}"
 
-    overall = "ok" if all(v == "ok" for v in checks.values()) else "degraded"
+    # Primary LLM reachability (e.g. LiteLLM behind VPN). Informational: a configured
+    # fallback means an unreachable primary does NOT make the service degraded.
+    loop = asyncio.get_running_loop()
+    primary_up = await loop.run_in_executor(None, _tcp_reachable, OPENAI_BASE_URL)
+    has_fallback = bool(FALLBACK_OPENAI_BASE_URL)
+    if primary_up:
+        checks["llm_primary"] = "ok"
+    elif has_fallback:
+        checks["llm_primary"] = "unreachable (using fallback — check VPN)"
+    else:
+        checks["llm_primary"] = "unreachable (no fallback — check VPN)"
+
+    core_ok = all(checks[k] == "ok" for k in ("api", "chroma", "graph"))
+    degraded_llm = not primary_up and not has_fallback
+    overall = "ok" if core_ok and not degraded_llm else "degraded"
     return {"status": overall, "checks": checks}
