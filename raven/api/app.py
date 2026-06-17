@@ -135,11 +135,30 @@ class IndexRequest(BaseModel):
 # ── SSE stream (chat) ─────────────────────────────────────────────────────────
 
 
+def _message_text(msg) -> str:
+    """Extract plain text from an AIMessage whose content may be a str or a list
+    of content blocks (some providers return the latter)."""
+    content = getattr(msg, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        return "".join(parts)
+    return ""
+
+
 async def _chat_stream(session_id: str, message: str) -> AsyncIterator[dict]:
     graph = await get_graph()
     config = {"configurable": {"thread_id": session_id}, "recursion_limit": 25}
     new_input = {"messages": [HumanMessage(content=message)]}
 
+    streamed_text = False  # did any token actually stream to the client?
+    final_text = ""  # last model message's text, as a fallback
     try:
         async for event in graph.astream_events(new_input, config=config, version="v2"):
             kind = event["event"]
@@ -161,11 +180,19 @@ async def _chat_stream(session_id: str, message: str) -> AsyncIterator[dict]:
 
             elif kind == "on_chat_model_stream":
                 chunk = data.get("chunk")
-                if chunk and chunk.content:
-                    yield {
-                        "event": "token",
-                        "data": json.dumps({"text": chunk.content}),
-                    }
+                text = _message_text(chunk) if chunk is not None else ""
+                if text:
+                    streamed_text = True
+                    yield {"event": "token", "data": json.dumps({"text": text})}
+
+            elif kind == "on_chat_model_end":
+                # Remember the final answer so we can emit it if the model never
+                # streamed tokens (some backends return the full reply at once,
+                # which otherwise shows up as an empty "— silence —" in the UI).
+                out = data.get("output")
+                text = _message_text(out) if out is not None else ""
+                if text.strip():
+                    final_text = text
 
             elif kind == "on_tool_start":
                 yield {
@@ -180,6 +207,8 @@ async def _chat_stream(session_id: str, message: str) -> AsyncIterator[dict]:
                     "data": json.dumps({"tool": name, "output": str(output)[:500]}),
                 }
     finally:
+        if not streamed_text and final_text:
+            yield {"event": "token", "data": json.dumps({"text": final_text})}
         yield {"event": "done", "data": json.dumps({"session_id": session_id})}
 
 
