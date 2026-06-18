@@ -1,0 +1,15 @@
+# Keep the build context small & secret-free.
+.git
+.venv
+data
+.env
+*.pyc
+**/__pycache__
+.ruff_cache
+.mypy_cache
+.pytest_cache
+tests
+sprints
+node_modules
+*.md
+!raven/**/*.md

@@ -10,18 +10,15 @@ import pytest
 # Set env vars BEFORE importing raven modules
 os.environ.setdefault("API_KEY", "test-key-123")
 os.environ.setdefault("WATCH_PATHS", "/tmp/raven-test-watch")
-os.environ.setdefault("CHROMA_PERSIST_DIR", "/tmp/raven-test-chroma")
+os.environ.setdefault("QDRANT_URL", ":memory:")
 os.environ.setdefault("OPENAI_API_KEY", "sk-test")
 os.environ.setdefault("OPENAI_BASE_URL", "http://localhost:4000/v1")
 
 
 @pytest.fixture
-def tmp_chroma_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Isolated Chroma dir per test."""
-    chroma = tmp_path / "chroma"
-    chroma.mkdir()
-    monkeypatch.setenv("CHROMA_PERSIST_DIR", str(chroma))
-    return chroma
+def qdrant_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the vector store to an isolated in-memory Qdrant per test."""
+    monkeypatch.setenv("QDRANT_URL", ":memory:")
 
 
 @pytest.fixture

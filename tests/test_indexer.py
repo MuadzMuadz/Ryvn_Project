@@ -18,13 +18,12 @@ def mock_embedder():
 
 
 @pytest.fixture
-def _isolated_indexer(tmp_chroma_dir, tmp_watch_path, tmp_path, monkeypatch, mock_embedder):
-    """Reload config + vectorstore with isolated dirs and mocked embedder."""
+def _isolated_indexer(qdrant_env, tmp_watch_path, tmp_path, monkeypatch, mock_embedder):
+    """Reload config + vectorstore with isolated store and mocked embedder."""
     import importlib
 
     import raven.config as cfg
 
-    monkeypatch.setenv("CHROMA_PERSIST_DIR", str(tmp_chroma_dir))
     monkeypatch.setenv("WATCH_PATHS", str(tmp_watch_path))
     importlib.reload(cfg)
     # Isolate the indexer's state file. FileIndexer persists hashes in

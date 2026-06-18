@@ -7,34 +7,31 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).parent.parent
 
-# LLM — primary chat model (OpenAI-compatible: LiteLLM proxy, LM Studio, Ollama, ...)
+# LLM — chat model (OpenAI-compatible: LiteLLM proxy, LM Studio, Ollama, ...).
+# Single shared endpoint, no fallback — points at the ryvn-litellm proxy.
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", None)
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-# LLM — fallback chat model. Used automatically when the primary errors or is
-# unreachable (e.g. LiteLLM proxy behind a VPN that's off). Leave base_url empty
-# to disable fallback. Each field falls back to the primary's value if unset.
-FALLBACK_OPENAI_API_KEY = os.getenv("FALLBACK_OPENAI_API_KEY", "")
-FALLBACK_OPENAI_BASE_URL = os.getenv("FALLBACK_OPENAI_BASE_URL", "")
-FALLBACK_OPENAI_MODEL = os.getenv("FALLBACK_OPENAI_MODEL", "")
-# Per-request timeout (seconds) for the primary, so an unreachable primary fails
-# fast and falls back instead of hanging.
-LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "12"))
+# Per-request timeout (seconds). With no fallback, give the model room to finish a
+# long generation instead of failing fast.
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "60"))
 
 # Firecrawl
 FIRECRAWL_API_URL = os.getenv("FIRECRAWL_API_URL", "http://localhost:3002")
 FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "fc-local")
 
-# Embeddings & Vector Store. Embeddings use their own endpoint (defaulting to the
-# primary LLM's) because the Chroma collection is bound to one model/dimension —
-# keep this pinned to a stable, always-on endpoint (e.g. local LM Studio) even when
-# the chat model points elsewhere.
+# Embeddings. Use their own endpoint (defaulting to the chat LLM's) because the
+# Qdrant collection is bound to one model/dimension — keep this pinned to a stable
+# endpoint and never change the model without re-indexing.
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
 EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", OPENAI_BASE_URL)
 EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", OPENAI_API_KEY)
-CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", str(BASE_DIR / "data" / "vectors"))
-CHROMA_COLLECTION = "raven_docs"
+
+# Vector store — Qdrant (ryvn-qdrant). Use ":memory:" for tests/ephemeral runs.
+# The collection is created lazily on first write using the embedding dimension.
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "raven_docs")
 
 # File system
 WATCH_PATHS = [
@@ -46,6 +43,10 @@ INDEXED_EXTENSIONS = set(
 DATA_DIR = BASE_DIR / "data"
 UPLOADS_DIR = DATA_DIR / "uploads"
 INDEXED_DIR = DATA_DIR / "indexed"
+
+# LangGraph checkpointer. Set DATABASE_URL to a Postgres DSN (ryvn-postgres) to
+# persist conversation state in the stack; leave empty to use the local SQLite file.
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 SESSIONS_DB = DATA_DIR / "sessions.db"
 
 # Where the agent writes its own notes (the `save_note` tool). Defaults to a folder

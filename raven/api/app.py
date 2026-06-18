@@ -11,7 +11,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
-import aiosqlite
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -23,15 +22,13 @@ from raven.config import (
     ALLOWED_ORIGINS,
     API_KEY,
     ENABLE_WATCHER,
-    FALLBACK_OPENAI_BASE_URL,
     INDEX_ON_STARTUP,
     INDEXED_EXTENSIONS,
     OPENAI_BASE_URL,
-    SESSIONS_DB,
     WATCH_PATHS,
     WATCHER_PATHS,
 )
-from raven.graph.agent import delete_thread, get_graph
+from raven.graph.agent import delete_thread, get_graph, list_thread_ids
 from raven.logging_config import get_logger, setup_logging
 from raven.rag.indexer import FileIndexer, is_excluded
 from raven.rag.vectorstore import get_store
@@ -342,10 +339,7 @@ async def index_init():
 
 async def _count_sessions() -> int:
     try:
-        async with aiosqlite.connect(str(SESSIONS_DB)) as conn:
-            cur = await conn.execute("SELECT COUNT(DISTINCT thread_id) FROM checkpoints")
-            row = await cur.fetchone()
-            return int(row[0]) if row else 0
+        return len(await list_thread_ids())
     except Exception:
         return 0
 
@@ -364,19 +358,14 @@ async def stats():
 @app.get("/sessions", dependencies=[Depends(require_api_key)])
 async def list_sessions():
     """List conversation sessions (newest first) with a title from the first user message."""
-    graph = await get_graph()  # ensures the checkpoint table exists
+    graph = await get_graph()  # ensures the checkpointer is set up
     try:
-        async with aiosqlite.connect(str(SESSIONS_DB)) as conn:
-            cur = await conn.execute(
-                "SELECT thread_id, MAX(checkpoint_id) AS last "
-                "FROM checkpoints GROUP BY thread_id ORDER BY last DESC"
-            )
-            rows = await cur.fetchall()
+        thread_ids = await list_thread_ids()
     except Exception:
         return {"sessions": []}
 
     sessions = []
-    for thread_id, _ in rows:
+    for thread_id in thread_ids:
         title, count = "", 0
         try:
             snap = await graph.aget_state({"configurable": {"thread_id": thread_id}})
@@ -416,8 +405,8 @@ async def clear_session(session_id: str):
 
 
 def _tcp_reachable(url: str | None, timeout: float = 2.0) -> bool:
-    """Quick TCP connect to a base_url's host:port — used to tell if the primary LLM
-    (e.g. the VPN-gated LiteLLM proxy) is up, without making a model call."""
+    """Quick TCP connect to a base_url's host:port — used to tell if the LLM
+    endpoint (the ryvn-litellm proxy) is up, without making a model call."""
     if not url:
         return False
     parsed = urlparse(url)
@@ -437,9 +426,9 @@ async def health():
 
     try:
         get_store().count()
-        checks["chroma"] = "ok"
+        checks["qdrant"] = "ok"
     except Exception as e:
-        checks["chroma"] = f"error: {e.__class__.__name__}"
+        checks["qdrant"] = f"error: {e.__class__.__name__}"
 
     try:
         await get_graph()
@@ -447,19 +436,12 @@ async def health():
     except Exception as e:
         checks["graph"] = f"error: {e.__class__.__name__}"
 
-    # Primary LLM reachability (e.g. LiteLLM behind VPN). Informational: a configured
-    # fallback means an unreachable primary does NOT make the service degraded.
+    # LLM endpoint reachability (the ryvn-litellm proxy). No fallback, so an
+    # unreachable endpoint makes the service degraded.
     loop = asyncio.get_running_loop()
-    primary_up = await loop.run_in_executor(None, _tcp_reachable, OPENAI_BASE_URL)
-    has_fallback = bool(FALLBACK_OPENAI_BASE_URL)
-    if primary_up:
-        checks["llm_primary"] = "ok"
-    elif has_fallback:
-        checks["llm_primary"] = "unreachable (using fallback — check VPN)"
-    else:
-        checks["llm_primary"] = "unreachable (no fallback — check VPN)"
+    llm_up = await loop.run_in_executor(None, _tcp_reachable, OPENAI_BASE_URL)
+    checks["llm"] = "ok" if llm_up else "unreachable"
 
-    core_ok = all(checks[k] == "ok" for k in ("api", "chroma", "graph"))
-    degraded_llm = not primary_up and not has_fallback
-    overall = "ok" if core_ok and not degraded_llm else "degraded"
+    core_ok = all(checks[k] == "ok" for k in ("api", "qdrant", "graph"))
+    overall = "ok" if core_ok and llm_up else "degraded"
     return {"status": overall, "checks": checks}

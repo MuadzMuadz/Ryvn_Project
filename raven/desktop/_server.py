@@ -6,7 +6,7 @@ Strategy (``ensure_server``):
 3. Else start an embedded uvicorn server in a background thread (all-in-one).
 
 The thin-shell path is what keeps a packaged ``.exe`` small: the heavy AI stack
-(chromadb, langchain, ...) stays in the long-running daemon, not in the GUI binary.
+(langchain, qdrant-client, ...) stays in the long-running daemon, not in the GUI binary.
 """
 
 from __future__ import annotations

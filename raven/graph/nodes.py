@@ -7,9 +7,6 @@ from langchain_core.messages.utils import trim_messages
 from langchain_openai import ChatOpenAI
 
 from raven.config import (
-    FALLBACK_OPENAI_API_KEY,
-    FALLBACK_OPENAI_BASE_URL,
-    FALLBACK_OPENAI_MODEL,
     LLM_TIMEOUT,
     MAX_CONVERSATION_TOKENS,
     OPENAI_API_KEY,
@@ -47,31 +44,22 @@ def _sanitize(text: str) -> str:
     return text.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
 
 
-def _make_chat(model: str, api_key: str, base_url: str | None, timeout: float | None = None):
-    kwargs: dict = dict(model=model, api_key=api_key, temperature=0, max_retries=0)
-    if base_url:
-        kwargs["base_url"] = base_url
-    if timeout:
-        kwargs["timeout"] = timeout
-    return ChatOpenAI(**kwargs).bind_tools(TOOLS)
-
-
 def _llm():
-    """Primary chat model, with the fallback model attached if configured.
+    """Chat model pointed at the single shared LiteLLM endpoint (no fallback).
 
-    The primary fails fast (LLM_TIMEOUT, no retries) so an unreachable endpoint —
-    e.g. the LiteLLM proxy when the VPN is down — falls back to the secondary model
-    (typically local LM Studio) instead of hanging.
+    One retry covers a transient blip; LLM_TIMEOUT bounds each request so a stuck
+    connection surfaces as an error instead of hanging forever.
     """
-    primary = _make_chat(OPENAI_MODEL, OPENAI_API_KEY, OPENAI_BASE_URL, timeout=LLM_TIMEOUT)
-    if FALLBACK_OPENAI_BASE_URL or FALLBACK_OPENAI_API_KEY:
-        fallback = _make_chat(
-            FALLBACK_OPENAI_MODEL or OPENAI_MODEL,
-            FALLBACK_OPENAI_API_KEY or OPENAI_API_KEY,
-            FALLBACK_OPENAI_BASE_URL or OPENAI_BASE_URL,
-        )
-        return primary.with_fallbacks([fallback])
-    return primary
+    kwargs: dict = dict(
+        model=OPENAI_MODEL,
+        api_key=OPENAI_API_KEY,
+        temperature=0,
+        max_retries=1,
+        timeout=LLM_TIMEOUT,
+    )
+    if OPENAI_BASE_URL:
+        kwargs["base_url"] = OPENAI_BASE_URL
+    return ChatOpenAI(**kwargs).bind_tools(TOOLS)
 
 
 def retrieve_node(state: AgentState) -> dict:

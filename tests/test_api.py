@@ -19,10 +19,9 @@ def mock_embedder():
 
 
 @pytest.fixture
-def _reload_app(tmp_chroma_dir, tmp_watch_path, monkeypatch, mock_embedder):
+def _reload_app(qdrant_env, tmp_watch_path, monkeypatch, mock_embedder):
     """Ensure config is loaded with test env vars before importing app."""
     monkeypatch.setenv("API_KEY", "test-key-123")
-    monkeypatch.setenv("CHROMA_PERSIST_DIR", str(tmp_chroma_dir))
     monkeypatch.setenv("WATCH_PATHS", str(tmp_watch_path))
     import raven.config as cfg
 

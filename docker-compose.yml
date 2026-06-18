@@ -1,0 +1,31 @@
+# Raven backend as part of the ryvn-* stack.
+#
+# Reaches sibling services by container name over the shared network, so .env on
+# the server should use internal URLs:
+#   OPENAI_BASE_URL=http://ryvn-litellm:4000/v1
+#   EMBEDDING_BASE_URL=http://ryvn-litellm:4000/v1
+#   QDRANT_URL=http://ryvn-qdrant:6333
+#
+# Find the stack's network name with `docker network ls` and set RYVN_NETWORK
+# (or rename below). Then: docker compose up -d --build
+services:
+  ryvn-raven:
+    build: .
+    image: ryvn-raven:latest
+    container_name: ryvn-raven
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "1802:1802"            # or drop this and route via ryvn-caddy
+    volumes:
+      - raven-data:/app/data   # sessions.db + index_state.json (vectors live in Qdrant)
+    networks:
+      - ryvn
+
+networks:
+  ryvn:
+    external: true
+    name: ${RYVN_NETWORK:-ryvn}
+
+volumes:
+  raven-data:
