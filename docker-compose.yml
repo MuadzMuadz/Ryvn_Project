@@ -19,6 +19,9 @@ services:
       - "1802:1802"            # or drop this and route via ryvn-caddy
     volumes:
       - raven-data:/app/data   # sessions.db + index_state.json (vectors live in Qdrant)
+      # Notes vault (save_note). Host path -> container NOTES_DIR. On the server the
+      # vault lives at /home/max/raven-vault; override via RAVEN_NOTES_DIR in .env.
+      - ${RAVEN_NOTES_DIR:-./notes}:/app/notes
     networks:
       - ryvn
 
